@@ -1,0 +1,25 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-Sysmon"/>
+    <EventID>3</EventID>
+    <Version>5</Version>
+    <Level>4</Level>
+    <TimeCreated SystemTime="2024-01-02T03:04:07.0000000Z"/>
+    <EventRecordID>103</EventRecordID>
+    <Channel>Microsoft-Windows-Sysmon/Operational</Channel>
+    <Computer>TEST-HOST</Computer>
+  </System>
+  <EventData>
+    <Data Name="UtcTime">2024-01-02 03:04:07.000</Data>
+    <Data Name="ProcessGuid">{00000000-0000-0000-0000-00000000000B}</Data>
+    <Data Name="ProcessId">200</Data>
+    <Data Name="Image">C:\Users\Public\pwsh.exe</Data>
+    <Data Name="User">TEST\user</Data>
+    <Data Name="Protocol">tcp</Data>
+    <Data Name="Initiated">true</Data>
+    <Data Name="SourceIp">10.0.0.5</Data>
+    <Data Name="SourcePort">51515</Data>
+    <Data Name="DestinationIp">203.0.113.10</Data>
+    <Data Name="DestinationPort">4444</Data>
+  </EventData>
+</Event>

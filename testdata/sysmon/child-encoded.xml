@@ -1,0 +1,24 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-Sysmon"/>
+    <EventID>1</EventID>
+    <Version>5</Version>
+    <Level>4</Level>
+    <TimeCreated SystemTime="2024-01-02T03:04:06.0000000Z"/>
+    <EventRecordID>102</EventRecordID>
+    <Channel>Microsoft-Windows-Sysmon/Operational</Channel>
+    <Computer>TEST-HOST</Computer>
+  </System>
+  <EventData>
+    <Data Name="UtcTime">2024-01-02 03:04:06.000</Data>
+    <Data Name="ProcessGuid">{00000000-0000-0000-0000-00000000000B}</Data>
+    <Data Name="ProcessId">200</Data>
+    <Data Name="Image">C:\Users\Public\pwsh.exe</Data>
+    <Data Name="CommandLine">pwsh.exe -EncodedCommand aGVsbG8= --api-key=SUPERSECRETVALUE</Data>
+    <Data Name="User">TEST\user</Data>
+    <Data Name="IntegrityLevel">Medium</Data>
+    <Data Name="ParentProcessGuid">{00000000-0000-0000-0000-00000000000A}</Data>
+    <Data Name="ParentProcessId">100</Data>
+    <Data Name="ParentImage">C:\Windows\System32\notepad.exe</Data>
+  </EventData>
+</Event>

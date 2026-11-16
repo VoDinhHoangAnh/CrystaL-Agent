@@ -1,0 +1,43 @@
+.env
+.env.*
+!.env.example
+pb-data/
+data/
+spool/
+archive/
+logs/
+*.json
+*.jsonl
+*.db
+*.sqlite*
+*.log
+*.exe
+*.dll
+*.pdb
+*.test
+*.tmp
+*.bak
+
+# Cấu hình cục bộ chứa thông tin nhạy cảm
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Thư viện được tải về và đầu ra build/test
+vendor/
+bin/
+build/
+dist/
+coverage.out
+coverage.html
+*.prof
+
+# File hệ điều hành
+Thumbs.db
+.DS_Store
+
+# Tài liệu phát triển và ghi chú, giữ lại README ở gốc
+docs/
+*.md
+!README.md

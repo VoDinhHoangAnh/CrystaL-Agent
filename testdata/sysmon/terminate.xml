@@ -1,0 +1,17 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-Sysmon"/>
+    <EventID>5</EventID>
+    <Version>5</Version>
+    <TimeCreated SystemTime="2024-01-02T03:05:00.0000000Z"/>
+    <EventRecordID>104</EventRecordID>
+    <Channel>Microsoft-Windows-Sysmon/Operational</Channel>
+    <Computer>TEST-HOST</Computer>
+  </System>
+  <EventData>
+    <Data Name="UtcTime">2024-01-02 03:05:00.000</Data>
+    <Data Name="ProcessGuid">{00000000-0000-0000-0000-00000000000B}</Data>
+    <Data Name="ProcessId">200</Data>
+    <Data Name="Image">C:\Users\Public\pwsh.exe</Data>
+  </EventData>
+</Event>
