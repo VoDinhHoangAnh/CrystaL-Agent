@@ -15,6 +15,7 @@ type SourceValidation struct {
 	SampleFound    bool
 	AccessDenied   bool
 	ChannelMissing bool
+	QueryError     bool
 	Detail         string
 }
 

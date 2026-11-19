@@ -22,7 +22,7 @@ func (ValidateService) ValidateGroups(ctx context.Context, groups []model.EventG
 		out = append(out, dto.EventSourceStatus{
 			Group: item.Group, Category: groups[i].Category, Channel: item.Channel, ChannelPresent: item.ChannelPresent,
 			SampleFound: item.SampleFound, AccessDenied: item.AccessDenied,
-			ChannelMissing: item.ChannelMissing, Detail: item.Detail,
+			ChannelMissing: item.ChannelMissing, QueryError: item.QueryError, Detail: item.Detail,
 		})
 	}
 	return out, nil

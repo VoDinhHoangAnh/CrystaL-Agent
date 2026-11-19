@@ -65,6 +65,7 @@ type Normalized struct {
 	Process             *ProcessFacts `json:"process,omitempty"`
 	Parent              *ProcessFacts `json:"parent,omitempty"`
 	Network             *NetworkFacts `json:"network,omitempty"`
+	Authentication      *AuthenticationFacts `json:"authentication,omitempty"`
 	Windows             *WindowsFacts `json:"windows,omitempty"`
 	SecretIndicator     bool          `json:"secret_indicator,omitempty"`
 	SecretPatternType   string        `json:"secret_pattern_type,omitempty"`
@@ -107,6 +108,18 @@ type NetworkFacts struct {
 	Domain     string `json:"domain,omitempty"`
 	PID        int64  `json:"pid,omitempty"`
 	GUID       string `json:"process_guid,omitempty"`
+}
+
+// AuthenticationFacts phân biệt tín hiệu xác thực với kết luận có cuộc tấn công.
+type AuthenticationFacts struct {
+	EventCode int    `json:"event_code"`
+	Username string   `json:"username,omitempty"`
+	Domain string     `json:"domain,omitempty"`
+	SourceIP string   `json:"source_ip,omitempty"`
+	Workstation string `json:"workstation,omitempty"`
+	LogonType int      `json:"logon_type,omitempty"`
+	Result string      `json:"result"`
+	FailureCode string `json:"failure_code,omitempty"`
 }
 
 // WindowsFacts giữ các trường Windows cần để tra cứu lại nguồn event.

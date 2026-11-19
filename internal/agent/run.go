@@ -40,11 +40,18 @@ func Run(ctx context.Context, cfg model.Config) error {
 		return err
 	}
 	p := &Pipeline{Cfg: cfg, Store: st, Graph: processgraph.New(id), AgentID: id}
-	_ = p.ReplayUnprocessed(ctx)
+	if err := p.ReplayUnprocessed(ctx); err != nil {
+		return fmt.Errorf("replay unprocessed events: %w", err)
+	}
 
 	cols := collector.WindowsCollectors(cfg,
 		func(cid string) (string, int64, error) { return st.LoadCheckpoint(ctx, cid) },
-		func(cid, bm string, rec int64) error { return st.SaveCheckpoint(ctx, cid, bm, rec, time.Now().UTC()) },
+		func(cid, bm string, rec int64) error {
+			// Bookmark cần được ghi cả khi service đang shutdown.
+			writeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			return st.SaveCheckpoint(writeCtx, cid, bm, rec, time.Now().UTC())
+		},
 	)
 
 	fmt.Println("PBRA agent starting")
@@ -60,27 +67,63 @@ func Run(ctx context.Context, cfg model.Config) error {
 	}
 	fmt.Println("policy=observe-only (no block/kill/quarantine, no audit policy change)")
 
-	// Collector chạy song song; hàng đợi chuyển từng bản ghi cho một luồng ghi store.
-	q := make(chan model.CollectorRecord, cfg.QueueSize)
+	// Collector chạy song song nhưng checkpoint chỉ được xác nhận khi ingest
+	// hoàn thành: enqueue không đồng nghĩa đã ghi bền vững.
+	type queuedRecord struct {
+		rec model.CollectorRecord
+		ack chan error
+	}
+	q := make(chan queuedRecord, cfg.QueueSize)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for rec := range q {
-			if err := p.Ingest(ctx, rec); err != nil {
+		for item := range q {
+			// Drain các bản ghi đã chấp nhận kể cả khi ctx chạy chính bị hủy.
+			writeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := p.Ingest(writeCtx, item.rec)
+			cancel()
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "ingest error: %v\n", err)
 			}
+			item.ack <- err
 		}
 	}()
 
 	emit := func(rec model.CollectorRecord) error {
+		item := queuedRecord{rec: rec, ack: make(chan error, 1)}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case q <- rec:
-			return nil
+		case q <- item:
+		}
+		select {
+		case err := <-item.ack:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
+
+	// Persist health trong khi collector đang chạy, không chỉ lúc dừng.
+	healthDone := make(chan struct{})
+	go func() {
+		defer close(healthDone)
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, c := range cols {
+					wctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					_ = st.SaveHealth(wctx, c.Health())
+					cancel()
+				}
+			}
+		}
+	}()
 
 	var cwg sync.WaitGroup
 	for _, c := range cols {
@@ -101,6 +144,7 @@ func Run(ctx context.Context, cfg model.Config) error {
 	}
 
 	<-ctx.Done()
+	<-healthDone
 	cwg.Wait()
 	close(q)
 	wg.Wait()

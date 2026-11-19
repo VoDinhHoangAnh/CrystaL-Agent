@@ -19,6 +19,7 @@ type Repository interface {
 	MarkRawProcessed(context.Context, string) error
 	UnprocessedRaw(context.Context, int) ([]model.RawEnvelope, error)
 	EventExists(context.Context, string, string, string) (bool, error)
+	RecentAuthFailures(context.Context, model.AuthenticationFacts, time.Time, time.Time) ([]model.Normalized, error)
 	PersistAnalyzed(context.Context, model.PersistInput) error
 	ListCurrentTracking(context.Context) ([]model.TrackedEntity, error)
 	GetTracked(context.Context, string) (model.TrackedEntity, []model.Finding, error)

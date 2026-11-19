@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"AegisPlus/CrystaL/internal/model"
+	"AegisPlus/CrystaL/internal/authdetect"
 	"AegisPlus/CrystaL/internal/normalize"
 	"AegisPlus/CrystaL/internal/privacy"
 	"AegisPlus/CrystaL/internal/processgraph"
@@ -31,22 +32,17 @@ type Pipeline struct {
 func (p *Pipeline) Ingest(ctx context.Context, rec model.CollectorRecord) error {
 	now := time.Now().UTC()
 	id := uuid.NewString()
-	payload, _ := json.Marshal(struct {
-		Kind     string          `json:"kind"`
-		Snapshot bool            `json:"snapshot"`
-		XML      string          `json:"xml,omitempty"`
-		Payload  json.RawMessage `json:"payload,omitempty"`
-	}{rec.Kind, rec.Snapshot, rec.XML, rec.Payload})
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
 	env := model.RawEnvelope{
 		EventID: id, AgentID: p.AgentID, Source: rec.Source, SourceEventKey: rec.SourceEventKey,
 		EventTime: rec.EventTime.UTC().Format(time.RFC3339Nano), ObservedAt: now.Format(time.RFC3339Nano),
 		SchemaVersion: model.SchemaVersion, Kind: rec.Kind, Snapshot: rec.Snapshot, XML: rec.XML, Payload: payload,
 	}
-	if rec.Process != nil {
-		// Snapshot process không có XML, nên giữ nguyên facts trong payload để replay được.
-		b, _ := json.Marshal(rec)
-		env.Payload = b
-	}
+	// Giữ đầy đủ Process, Parent và Network facts cho cả snapshot và replay.
+	// Bản JSON của CollectorRecord được chuẩn hóa về cùng một schema ở Handle().
 	env.SpoolPath = p.Store.Path()
 	if err := p.Store.AppendRaw(ctx, env); err != nil {
 		return err
@@ -126,6 +122,31 @@ func (p *Pipeline) Handle(ctx context.Context, env model.RawEnvelope) error {
 		TrackMedium: p.Cfg.TrackMedium, SuspiciousPorts: p.Cfg.SuspiciousPorts,
 	})
 
+	if n.Authentication != nil && (n.Authentication.EventCode == 4625 || n.Authentication.EventCode == 4624) {
+		since := n.EventTime.Add(-5 * time.Minute)
+		prior, err := p.Store.RecentAuthFailures(ctx, *n.Authentication, since, n.EventTime)
+		if err != nil {
+			return err
+		}
+		for _, f := range authdetect.Analyze(n, prior) {
+			a.Findings = append(a.Findings, f)
+			if f.Points > a.Score {
+				a.Score = f.Points
+			}
+			if a.Score >= p.Cfg.Thresholds.Critical {
+				a.Severity = "critical"
+			} else if a.Score >= p.Cfg.Thresholds.High {
+				a.Severity = "high"
+			} else if a.Score >= p.Cfg.Thresholds.Medium {
+				a.Severity = "medium"
+			}
+			a.Track = true
+		}
+		if n.Authentication.SourceIP != "" && len(a.Findings) > 0 {
+			remoteIP = n.Authentication.SourceIP
+		}
+	}
+
 	imageID := ""
 	if n.Process != nil && n.Process.ImagePath != "" {
 		imageID = uuid.NewSHA1(uuid.NameSpaceURL, []byte(n.Process.ImagePath+"|"+n.Process.SHA256)).String()
@@ -182,17 +203,21 @@ func (p *Pipeline) ReplayFile(ctx context.Context, path string) (int, error) {
 }
 
 func (p *Pipeline) ReplayUnprocessed(ctx context.Context) error {
-	rows, err := p.Store.UnprocessedRaw(ctx, 500)
-	if err != nil {
-		return err
-	}
-	for _, env := range rows {
-		env.SpoolPath = p.Store.Path()
-		if err := p.Handle(ctx, env); err != nil {
+	for {
+		rows, err := p.Store.UnprocessedRaw(ctx, 500)
+		if err != nil {
 			return err
 		}
+		if len(rows) == 0 {
+			return nil
+		}
+		for _, env := range rows {
+			env.SpoolPath = p.Store.Path()
+			if err := p.Handle(ctx, env); err != nil {
+				return err
+			}
+		}
 	}
-	return nil
 }
 
 func isLoopback(s string) bool {
