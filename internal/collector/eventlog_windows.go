@@ -77,18 +77,42 @@ func (c *eventLogCollector) setHealth(status, reason, priv, errStr string) {
 }
 
 func (c *eventLogCollector) Run(ctx context.Context, emit func(model.CollectorRecord) error) error {
+	// Lỗi subscription phải tái kết nối; không spin CPU hoặc im lặng chờ mãi.
+	delay := time.Second
+	for ctx.Err() == nil {
+		err := c.runSubscription(ctx, emit)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err == nil {
+			return nil
+		}
+		status, reason, priv := ClassifyWinErr(err)
+		c.setHealth(status, reason, priv, err.Error())
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+		if delay < 30*time.Second {
+			delay *= 2
+		}
+	}
+	return nil
+}
+
+func (c *eventLogCollector) runSubscription(ctx context.Context, emit func(model.CollectorRecord) error) error {
 	// Bookmark cho phép tiếp tục từ vị trí đã lưu sau khi agent khởi động lại.
 	// Nếu chưa có bookmark, collector đăng ký nhận event mới thay vì đọc toàn bộ lịch sử.
-	bookmarkXML, _, _ := c.load(c.id)
+	bookmarkXML, _, err := c.load(c.id)
+	if err != nil {
+		return err
+	}
 	sub, bookmark, signal, err := c.subscribe(bookmarkXML)
 	if err != nil {
-		st, reason, priv := ClassifyWinErr(err)
-		if reason == "no_events" {
-			st, reason, priv = "available", "idle", "ok"
-		}
-		c.setHealth(st, reason, priv, err.Error())
-		<-ctx.Done()
-		return nil
+		return err
 	}
 	defer evtClose(sub)
 	if bookmark != 0 {
@@ -102,8 +126,7 @@ func (c *eventLogCollector) Run(ctx context.Context, emit func(model.CollectorRe
 	events := make([]evtHandle, 16)
 	for {
 		if ctx.Err() != nil {
-			c.flushBookmark(bookmark)
-			return nil
+			return c.flushBookmark(bookmark)
 		}
 		_, _ = windows.WaitForSingleObject(signal, 500)
 		n, err := evtNext(sub, events)
@@ -113,32 +136,46 @@ func (c *eventLogCollector) Run(ctx context.Context, emit func(model.CollectorRe
 				continue
 			}
 			c.setHealth(st, reason, priv, err.Error())
-			continue
+			return err
 		}
 		for i := uint32(0); i < n; i++ {
 			h := events[i]
 			xmlStr, recID, evTime, rerr := renderEvent(h)
 			if rerr == nil {
-				key := c.channel + "|" + strconv.FormatInt(recID, 10)
-				rec := model.CollectorRecord{
-					Source: c.channel, SourceEventKey: key, EventTime: evTime,
-					Kind: "winevent", XML: xmlStr,
+				if recID <= 0 {
+					rerr = windows.ERROR_INVALID_DATA
+				} else {
+					key := c.channel + "|" + strconv.FormatInt(recID, 10)
+					rec := model.CollectorRecord{
+						Source: c.channel, SourceEventKey: key, EventTime: evTime,
+						Kind: "winevent", XML: xmlStr,
+					}
+					rerr = emit(rec)
 				}
-				if err := emit(rec); err == nil {
-					c.mu.Lock()
-					c.health.EventsSeen++
-					c.health.LastSuccessAt = time.Now().UTC()
-					c.health.Status = "available"
-					c.mu.Unlock()
-				}
-				// Bookmark được tiến theo event cuối batch để lần chạy sau tiếp tục gần vị trí này.
-				if bookmark != 0 {
-					_, _, _ = procEvtUpdateBookmark.Call(uintptr(bookmark), uintptr(h))
+			}
+			if rerr == nil && bookmark != 0 {
+				r, _, callErr := procEvtUpdateBookmark.Call(uintptr(bookmark), uintptr(h))
+				if r == 0 {
+					rerr = callErr
 				}
 			}
 			evtClose(h)
+			if rerr != nil {
+				for j := i + 1; j < n; j++ {
+					evtClose(events[j])
+				}
+				// Không checkpoint event lỗi. Retry từ bookmark bền vững.
+				return rerr
+			}
+			c.mu.Lock()
+			c.health.EventsSeen++
+			c.health.LastSuccessAt = time.Now().UTC()
+			c.health.Status = "available"
+			c.mu.Unlock()
 		}
-		c.flushBookmark(bookmark)
+		if err := c.flushBookmark(bookmark); err != nil {
+			return err
+		}
 	}
 }
 
@@ -162,17 +199,31 @@ func (c *eventLogCollector) subscribe(bookmarkXML string) (sub evtHandle, bookma
 		q = uintptr(unsafe.Pointer(qp))
 	}
 	flags := uintptr(evtSubscribeToFutureEvents)
+	var resumeBookmark uintptr
 	if bookmarkXML != "" {
 		p, perr := windows.UTF16PtrFromString(bookmarkXML)
-		if perr == nil {
-			r, _, _ := procEvtCreateBookmark.Call(uintptr(unsafe.Pointer(p)))
-			bookmark = evtHandle(r)
-			if bookmark != 0 {
-				flags = evtSubscribeStartAfterBookmark
-			}
+		if perr != nil {
+			windows.CloseHandle(signal)
+			return 0, 0, 0, perr
 		}
+		r, _, callErr := procEvtCreateBookmark.Call(uintptr(unsafe.Pointer(p)))
+		if r == 0 {
+			windows.CloseHandle(signal)
+			return 0, 0, 0, callErr
+		}
+		bookmark = evtHandle(r)
+		resumeBookmark = uintptr(bookmark)
+		flags = evtSubscribeStartAfterBookmark
+	} else {
+		// Không có bookmark cũ vẫn phải tạo handle để lưu vị trí đầu tiên.
+		r, _, callErr := procEvtCreateBookmark.Call(0)
+		if r == 0 {
+			windows.CloseHandle(signal)
+			return 0, 0, 0, callErr
+		}
+		bookmark = evtHandle(r)
 	}
-	r, _, callErr := procEvtSubscribe.Call(0, uintptr(signal), uintptr(unsafe.Pointer(ch)), q, uintptr(bookmark), 0, 0, flags)
+	r, _, callErr := procEvtSubscribe.Call(0, uintptr(signal), uintptr(unsafe.Pointer(ch)), q, resumeBookmark, 0, 0, flags)
 	if r == 0 {
 		if bookmark != 0 {
 			evtClose(bookmark)
@@ -186,9 +237,9 @@ func (c *eventLogCollector) subscribe(bookmarkXML string) (sub evtHandle, bookma
 	return evtHandle(r), bookmark, signal, nil
 }
 
-func (c *eventLogCollector) flushBookmark(bookmark evtHandle) {
+func (c *eventLogCollector) flushBookmark(bookmark evtHandle) error {
 	if bookmark == 0 || c.save == nil {
-		return
+		return nil
 	}
 	buf := make([]uint16, 2048)
 	var used uint32
@@ -198,9 +249,9 @@ func (c *eventLogCollector) flushBookmark(bookmark evtHandle) {
 		r, _, _ = procEvtRender.Call(0, uintptr(bookmark), evtRenderBookmark, uintptr(len(buf)*2), uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&used)), 0)
 	}
 	if r == 0 {
-		return
+		return windows.ERROR_INVALID_DATA
 	}
-	_ = c.save(c.id, windows.UTF16ToString(buf), 0)
+	return c.save(c.id, windows.UTF16ToString(buf), 0)
 }
 
 func renderEvent(h evtHandle) (xmlStr string, recordID int64, eventTime time.Time, err error) {
