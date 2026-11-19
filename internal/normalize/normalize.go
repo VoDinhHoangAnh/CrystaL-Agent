@@ -31,6 +31,7 @@ func Envelope(agentID string, rec model.SourceRecord, cfg model.Config) model.No
 			n.EventType = "winevent"
 			applySysmon(&n, ev, data, cfg)
 			applySecurity(&n, ev, data, cfg)
+			applyAuthentication(&n, ev, data)
 		}
 	}
 	if rec.Kind == "process" || rec.Process != nil {

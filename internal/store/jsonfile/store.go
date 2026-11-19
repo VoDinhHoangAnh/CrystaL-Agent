@@ -246,6 +246,36 @@ func (s *Store) EventExists(ctx context.Context, agentID, source, key string) (b
 	return false, nil
 }
 
+// RecentAuthFailures truy xuất các thất bại đã lưu trong cửa sổ thời gian.
+// Chỉ so sánh khi có đủ username + nguồn IP để tránh kết luận nhầm.
+func (s *Store) RecentAuthFailures(ctx context.Context, auth model.AuthenticationFacts, since, until time.Time) ([]model.Normalized, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if auth.Username == "" || auth.SourceIP == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]model.Normalized, 0, 8)
+	for _, r := range s.doc.AnalyzedEvents {
+		n := r.Data.Norm
+		a := n.Authentication
+		if a == nil || a.Result != "failure" || a.EventCode != 4625 {
+			continue
+		}
+		if n.EventTime.Before(since) || n.EventTime.After(until) {
+			continue
+		}
+		if strings.EqualFold(a.Username, auth.Username) &&
+			strings.EqualFold(a.Domain, auth.Domain) &&
+			strings.EqualFold(a.SourceIP, auth.SourceIP) {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
 // PersistAnalyzed lưu event chuẩn hóa, kết quả phân tích và trạng thái theo dõi liên quan.
 func (s *Store) PersistAnalyzed(ctx context.Context, in model.PersistInput) error {
 	if err := ctx.Err(); err != nil {
