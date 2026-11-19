@@ -126,6 +126,8 @@ func printSourceResult(result dto.EventSourceStatus) {
 		status = "THIẾU QUYỀN KIỂM TRA"
 	case result.ChannelMissing:
 		status = "THIẾU CHANNEL"
+	case result.QueryError:
+		status = "LỖI TRUY VẤN EVENT"
 	case result.ChannelPresent && result.SampleFound:
 		status = "CHANNEL OK, CÓ EVENT MẪU"
 	case result.ChannelPresent:

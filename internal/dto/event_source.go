@@ -9,5 +9,6 @@ type EventSourceStatus struct {
 	SampleFound    bool   `json:"sample_event_found"`
 	AccessDenied   bool   `json:"access_denied"`
 	ChannelMissing bool   `json:"channel_missing"`
+	QueryError     bool   `json:"query_error"`
 	Detail         string `json:"detail"`
 }

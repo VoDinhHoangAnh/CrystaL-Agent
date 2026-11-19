@@ -18,6 +18,7 @@ type SourceValidation struct {
 	SampleFound    bool
 	AccessDenied   bool
 	ChannelMissing bool
+	QueryError     bool
 	Detail         string
 }
 
@@ -56,7 +57,14 @@ func ValidateEventSources(ctx context.Context, groups []model.EventGroup) []Sour
 		} else if err == nil || containsNoEvents(string(out)) || containsNoEvents(err.Error()) {
 			result.Detail = "Channel truy cập được; chưa có event mẫu phù hợp trong log hiện có."
 		} else {
-			result.Detail = "Channel tồn tại nhưng truy vấn event lỗi: " + cleanCommandError(err)
+			result.QueryError = true
+			detail := strings.ToLower(string(out) + " " + err.Error())
+			if strings.Contains(detail, "access denied") || strings.Contains(detail, "access is denied") || strings.Contains(detail, "exit status 5") {
+				result.AccessDenied = true
+				result.Detail = "Channel tồn tại nhưng thiếu quyền truy vấn event."
+			} else {
+				result.Detail = "Channel tồn tại nhưng truy vấn event lỗi: " + cleanCommandError(err)
+			}
 		}
 		results = append(results, result)
 	}
