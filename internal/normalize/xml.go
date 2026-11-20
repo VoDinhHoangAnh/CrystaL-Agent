@@ -19,6 +19,32 @@ func parseWinXML(raw string) (model.WinEvent, map[string]string, error) {
 	for _, d := range ev.EventData.Data {
 		m[d.Name] = strings.TrimSpace(d.Value)
 	}
+	// Event 1149 places user/domain/client address under
+	// <UserData><EventXML xmlns="Event_NS"><Param1..3>.
+	// Do not mistake this authentication signal for an established logon session.
+	if ev.System.EventID == "1149" {
+		var nested struct {
+			UserData struct {
+				EventXML struct {
+					Param1 string `xml:"Param1"`
+					Param2 string `xml:"Param2"`
+					Param3 string `xml:"Param3"`
+				} `xml:"EventXML"`
+			} `xml:"UserData"`
+		}
+		if err := xml.Unmarshal([]byte(raw), &nested); err != nil {
+			return ev, nil, err
+		}
+		if nested.UserData.EventXML.Param1 != "" {
+			m["RDPUser"] = strings.TrimSpace(nested.UserData.EventXML.Param1)
+		}
+		if nested.UserData.EventXML.Param2 != "" {
+			m["RDPDomain"] = strings.TrimSpace(nested.UserData.EventXML.Param2)
+		}
+		if nested.UserData.EventXML.Param3 != "" {
+			m["RDPSourceIP"] = strings.TrimSpace(nested.UserData.EventXML.Param3)
+		}
+	}
 	return ev, m, nil
 }
 

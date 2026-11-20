@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"AegisPlus/CrystaL/internal/model"
-	"AegisPlus/CrystaL/internal/authdetect"
 	"AegisPlus/CrystaL/internal/normalize"
 	"AegisPlus/CrystaL/internal/privacy"
 	"AegisPlus/CrystaL/internal/processgraph"
@@ -144,29 +143,10 @@ func (p *Pipeline) Handle(ctx context.Context, env model.RawEnvelope) error {
 		TrackMedium: p.Cfg.TrackMedium, SuspiciousPorts: p.Cfg.SuspiciousPorts,
 	})
 
-	if n.Authentication != nil && (n.Authentication.EventCode == 4625 || n.Authentication.EventCode == 4624) {
-		since := n.EventTime.Add(-5 * time.Minute)
-		prior, err := p.Store.RecentAuthFailures(ctx, *n.Authentication, since, n.EventTime)
-		if err != nil {
-			return err
-		}
-		for _, f := range authdetect.Analyze(n, prior) {
-			a.Findings = append(a.Findings, f)
-			if f.Points > a.Score {
-				a.Score = f.Points
-			}
-			if a.Score >= p.Cfg.Thresholds.Critical {
-				a.Severity = "critical"
-			} else if a.Score >= p.Cfg.Thresholds.High {
-				a.Severity = "high"
-			} else if a.Score >= p.Cfg.Thresholds.Medium {
-				a.Severity = "medium"
-			}
-			a.Track = true
-		}
-		if n.Authentication.SourceIP != "" && len(a.Findings) > 0 {
-			remoteIP = n.Authentication.SourceIP
-		}
+	// Auth correlation is computed from persisted event-time history in the
+	// repository transaction, not the arrival order of this single event.
+	if n.Authentication != nil {
+		remoteIP = n.Authentication.SourceIP
 	}
 
 	imageID := ""
