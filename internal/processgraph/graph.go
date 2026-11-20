@@ -35,26 +35,36 @@ func (g *Graph) Resolve(pid int64, guid string, ppid int64, parentGUID string, s
 	if guid != "" {
 		if id, ok := g.byGUID[guid]; ok {
 			r.InstanceID = id
-			g.markEnded(id, terminated, started)
+			g.refreshSlot(id, pid, guid, started, terminated)
 			r.ParentID, r.ParentResolved, r.MissingParent = g.parent(ppid, parentGUID, started)
 			return r
 		}
-	}
-	if pid != 0 && !started.IsZero() {
-		if id, amb := g.matchPID(pid, started); id != "" {
-			r.InstanceID = id
-			r.PIDReuseAmbiguous = amb
-			g.markEnded(id, terminated, started)
-			if guid != "" {
-				g.byGUID[guid] = id
+		// Conflicting nonempty GUIDs must never merge through the PID fallback.
+		// A deterministic per-agent GUID identity remains stable after restart.
+		r.NewInstance = true
+		r.InstanceID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(g.agentID+"|process-guid|"+guid)).String()
+	} else {
+		if pid != 0 && !started.IsZero() {
+			if id, amb := g.matchPID(pid, started); id != "" {
+				r.InstanceID = id
+				r.PIDReuseAmbiguous = amb
+				g.refreshSlot(id, pid, guid, started, terminated)
+				r.ParentID, r.ParentResolved, r.MissingParent = g.parent(ppid, parentGUID, started)
+				return r
 			}
-			r.ParentID, r.ParentResolved, r.MissingParent = g.parent(ppid, parentGUID, started)
-			return r
+			// Reconcile a unique unresolved GUID-less parent stub. PID-only
+			// attribution still has weak evidence, so mark ambiguity.
+			if id, ok := g.reconcilePIDStub(pid, started); ok {
+				r.InstanceID = id
+				r.PIDReuseAmbiguous = true
+				g.refreshSlot(id, pid, guid, started, terminated)
+				r.ParentID, r.ParentResolved, r.MissingParent = g.parent(ppid, parentGUID, started)
+				return r
+			}
 		}
+		r.NewInstance = true
+		r.InstanceID = uuid.NewString()
 	}
-
-	r.NewInstance = true
-	r.InstanceID = uuid.NewString()
 	slot := model.GraphSlot{InstanceID: r.InstanceID, PID: pid, GUID: guid, Started: started}
 	if terminated && !started.IsZero() {
 		slot.Ended = started
@@ -72,10 +82,15 @@ func (g *Graph) Resolve(pid int64, guid string, ppid int64, parentGUID string, s
 
 func (g *Graph) parent(ppid int64, parentGUID string, childStart time.Time) (id string, resolved bool, missing bool) {
 	if parentGUID != "" {
-		if pid, ok := g.byGUID[parentGUID]; ok {
-			return pid, true, false
+		if existingID, ok := g.byGUID[parentGUID]; ok {
+			for _, slot := range g.slots {
+				if slot.InstanceID == existingID {
+					return existingID, !slot.Stub, slot.Stub
+				}
+			}
+			return existingID, false, true
 		}
-		id = uuid.NewString()
+		id = uuid.NewSHA1(uuid.NameSpaceOID, []byte(g.agentID+"|process-guid|"+parentGUID)).String()
 		g.byGUID[parentGUID] = id
 		g.slots = append(g.slots, model.GraphSlot{InstanceID: id, GUID: parentGUID, PID: ppid, Stub: true, Started: childStart.Add(-time.Second)})
 		return id, false, true
@@ -119,6 +134,44 @@ func (g *Graph) matchPID(pid int64, at time.Time) (string, bool) {
 		return live[len(live)-1].InstanceID, true
 	}
 	return "", false
+}
+
+// refreshSlot upgrades an unresolved stub when PID/GUID facts arrive.
+func (g *Graph) refreshSlot(id string, pid int64, guid string, at time.Time, terminated bool) {
+	for i := range g.slots {
+		slot := &g.slots[i]
+		if slot.InstanceID != id { continue }
+		if pid != 0 { slot.PID = pid }
+		if guid != "" { slot.GUID = guid }
+		if slot.Stub {
+			if !at.IsZero() && (slot.Started.IsZero() || at.Before(slot.Started)) {
+				slot.Started = at
+			}
+			slot.Stub = false
+			slot.Resolved = true
+		}
+		if terminated { slot.Ended = at }
+		return
+	}
+	slot := model.GraphSlot{InstanceID:id,PID:pid,GUID:guid,Started:at}
+	if terminated { slot.Ended = at }
+	g.slots = append(g.slots,slot)
+}
+
+// reconcilePIDStub is only safe for a unique unresolved GUID-less stub.
+func (g *Graph) reconcilePIDStub(pid int64, at time.Time) (string, bool) {
+	idx := -1
+	for i := range g.slots {
+		slot := g.slots[i]
+		if !slot.Stub || slot.PID != pid || slot.GUID != "" || !slot.Ended.IsZero() ||
+			at.IsZero() || slot.Started.IsZero() || at.After(slot.Started) {
+			continue
+		}
+		if idx != -1 { return "", false }
+		idx = i
+	}
+	if idx == -1 { return "", false }
+	return g.slots[idx].InstanceID, true
 }
 
 func (g *Graph) markEnded(id string, terminated bool, at time.Time) {

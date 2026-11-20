@@ -155,14 +155,21 @@ func applySecurity(n *model.Normalized, ev model.WinEvent, data map[string]strin
 		}
 	case 5156:
 		n.EventType = "network"
+		direction := dirName(first(data, "Direction"))
+		srcIP, srcPort := CanonicalIP(first(data, "SourceAddress")), int(atoi64(first(data, "SourcePort")))
+		dstIP, dstPort := CanonicalIP(first(data, "DestAddress")), int(atoi64(first(data, "DestPort")))
+		// 5156 source/destination follow packet direction. NetworkFacts
+		// local/remote instead describe the observed Windows endpoint.
+		if direction == "inbound" {
+			srcIP, dstIP = dstIP, srcIP
+			srcPort, dstPort = dstPort, srcPort
+		}
 		n.Network = &model.NetworkFacts{
-			Protocol:   protoName(first(data, "Protocol")),
-			Direction:  dirName(first(data, "Direction")),
-			LocalIP:    CanonicalIP(first(data, "SourceAddress")),
-			LocalPort:  int(atoi64(first(data, "SourcePort"))),
-			RemoteIP:   CanonicalIP(first(data, "DestAddress")),
-			RemotePort: int(atoi64(first(data, "DestPort"))),
-			PID:        atoi64(first(data, "ProcessId")),
+			Protocol: protoName(first(data, "Protocol")),
+			Direction: direction,
+			LocalIP: srcIP, LocalPort: srcPort,
+			RemoteIP: dstIP, RemotePort: dstPort,
+			PID: atoi64(first(data, "ProcessID", "ProcessId")),
 		}
 	}
 	_ = cfg
@@ -262,9 +269,9 @@ func protoName(s string) string {
 func dirName(s string) string {
 	switch s {
 	case "%%14592":
-		return "outbound"
-	case "%%14593":
 		return "inbound"
+	case "%%14593":
+		return "outbound"
 	default:
 		return strings.ToLower(s)
 	}

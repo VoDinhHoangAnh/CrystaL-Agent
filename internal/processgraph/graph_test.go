@@ -49,3 +49,29 @@ func TestTerminateExisting(t *testing.T) {
 		t.Fatal("terminate should resolve same instance")
 	}
 }
+
+func TestDistinctGUIDsSamePIDWithoutTermination(t *testing.T) {
+	g:=New("agent")
+	now:=time.Date(2026,11,20,10,0,0,0,time.UTC)
+	a:=g.Resolve(42,"{A}",0,"",now,false)
+	b:=g.Resolve(42,"{B}",0,"",now.Add(time.Minute),false)
+	if a.InstanceID==b.InstanceID {t.Fatal("distinct GUIDs collapsed into one instance")}
+	if b.PIDReuseAmbiguous {t.Fatal("GUID distinction is authoritative, not ambiguous")}
+}
+
+func TestGUIDIdentityStableAcrossGraphRestart(t *testing.T) {
+	now:=time.Date(2026,11,20,10,0,0,0,time.UTC)
+	a:=New("agent").Resolve(42,"{A}",0,"",now,false)
+	b:=New("agent").Resolve(42,"{A}",0,"",now.Add(time.Minute),false)
+	if a.InstanceID != b.InstanceID {t.Fatalf("GUID instance changed across restart: %s != %s",a.InstanceID,b.InstanceID)}
+	if a.InstanceID==New("another-agent").Resolve(42,"{A}",0,"",now,false).InstanceID {t.Fatal("same GUID from distinct agents collided")}
+}
+
+func TestPIDOnlyParentArrivesSixtySecondsLate(t *testing.T) {
+	g:=New("agent")
+	now:=time.Date(2026,11,20,10,0,0,0,time.UTC)
+	child:=g.Resolve(200,"",100,"",now.Add(time.Minute),false)
+	parent:=g.Resolve(100,"",0,"",now,false)
+	if child.ParentID != parent.InstanceID {t.Fatalf("PID-only parent wasn't reconciled: child %s parent %s",child.ParentID,parent.InstanceID)}
+	if !parent.PIDReuseAmbiguous {t.Fatal("reconciled PID-only stub must remain marked ambiguous")}
+}
