@@ -52,7 +52,20 @@ func AssertNoSecret(haystack, originalCmd string) bool {
 	// A safe positive only when the original recognized matches are not reproduced.
 	for _, re := range []*regexp.Regexp{assignment, spacedFlag, authHeader} {
 		for _, m := range re.FindAllString(originalCmd, -1) {
-			if m != "" && strings.Contains(haystack, m) { return false }
+			if m == "" { continue }
+			var secret string
+			if i := strings.IndexAny(m, ":="); i >= 0 {
+				secret = strings.TrimSpace(m[i+1:])
+				if strings.EqualFold(secret, "Bearer") {
+					secret = ""
+				}
+			} else if f := strings.Fields(m); len(f) > 1 {
+				secret = f[len(f)-1]
+			}
+			secret = strings.Trim(secret, "\"'")
+			if secret != "" && strings.Contains(haystack, secret) {
+				return false
+			}
 		}
 	}
 	return true
