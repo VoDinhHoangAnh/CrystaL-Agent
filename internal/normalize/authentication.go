@@ -39,9 +39,9 @@ func applyAuthentication(n *model.Normalized, ev model.WinEvent, data map[string
 	default:
 		return
 	}
-	a.Username = first(data, "TargetUserName", "AccountName")
-	a.Domain = first(data, "TargetDomainName", "TargetDomain")
-	a.SourceIP = CanonicalIP(first(data, "IpAddress", "ClientAddress", "SourceNetworkAddress", "SourceAddress"))
+	a.Username = first(data, "TargetUserName", "AccountName", "RDPUser")
+	a.Domain = first(data, "TargetDomainName", "TargetDomain", "RDPDomain")
+	a.SourceIP = CanonicalIP(first(data, "IpAddress", "ClientAddress", "SourceNetworkAddress", "SourceAddress", "RDPSourceIP"))
 	if a.SourceIP == "-" || a.SourceIP == "::1" {
 		a.SourceIP = ""
 	}
