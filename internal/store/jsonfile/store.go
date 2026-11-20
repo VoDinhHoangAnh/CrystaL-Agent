@@ -406,6 +406,9 @@ func (s *Store) reconcileAuthLocked(current model.Normalized) {
 		}
 	}
 	plan := authdetect.Reconcile(related)
+	// Keep a stable materialized list of auth findings for the tracked IP;
+	// reconciliation must replace, not append, historical detections.
+	groupFindings := make([]model.Finding, 0, 2)
 	for _, idx := range indices {
 		entry := &s.doc.AnalyzedEvents[idx].Data
 		kept := make([]model.Finding,0,len(entry.Assessment.Findings)+2)
@@ -437,7 +440,17 @@ func (s *Store) reconcileAuthLocked(current model.Normalized) {
 			entry.IPKey = entry.Norm.Authentication.SourceIP
 			entry.TrackIP = true
 			s.upsertTrackedLocked(*entry,"ip",entry.IPKey)
+			groupFindings = append(groupFindings,newFindings...)
 		}
+	}
+	if len(groupFindings)>0 {
+		ipID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(current.AgentID+"|ip|"+a.SourceIP)).String()
+		// Preserve non-auth findings from process/network risk analytics.
+		kept := make([]model.Finding, 0,len(s.doc.Findings[ipID]))
+		for _, f := range s.doc.Findings[ipID] {
+			if !strings.HasPrefix(f.RuleID,"auth_") { kept=append(kept,f) }
+		}
+		s.doc.Findings[ipID] = append(kept,groupFindings...)
 	}
 }
 
