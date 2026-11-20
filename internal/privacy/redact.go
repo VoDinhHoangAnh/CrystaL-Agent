@@ -7,39 +7,66 @@ import (
 	"AegisPlus/CrystaL/internal/model"
 )
 
-var secretPattern = regexp.MustCompile(`(?i)((?:password|passwd|pwd|token|api[_-]?key|client[_-]?secret|authorization|bearer|secret))\s*[:=]\s*([^\s,;]+)`)
+// Redaction is intentionally conservative for known sensitive key/value patterns.
+// Unknown formats and arbitrary free-form secrets are NOT guaranteed safe.
+var (
+	assignment = regexp.MustCompile(`(?i)(?:--?|/)?(?:password|passwd|pwd|token|api[_-]?key|client[_-]?secret|secret)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
+	spacedFlag = regexp.MustCompile(`(?i)(?:--?|/)(?:password|passwd|pwd|token|api[_-]?key|client[_-]?secret|secret)\s+(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
+	authHeader = regexp.MustCompile(`(?i)(?:authorization\s*:\s*)?bearer\s+(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
+)
 
-// RedactCommandLine che giá trị tham số có vẻ là bí mật nhưng giữ lại tên tham số.
+// RedactCommandLine masks recognized credentials without retaining their values.
 func RedactCommandLine(cmd string) model.Redaction {
 	if cmd == "" {
 		return model.Redaction{Redacted: cmd}
 	}
-	if !secretPattern.MatchString(cmd) {
+	found := assignment.MatchString(cmd) || spacedFlag.MatchString(cmd) || authHeader.MatchString(cmd)
+	if !found {
 		return model.Redaction{Redacted: cmd}
 	}
-	out := secretPattern.ReplaceAllStringFunc(cmd, func(m string) string {
-		sub := secretPattern.FindStringSubmatch(m)
-		if len(sub) >= 2 {
-			return sub[1] + "=[REDACTED]"
-		}
-		return "[REDACTED]"
+	out := assignment.ReplaceAllStringFunc(cmd, func(s string) string {
+		idx := strings.IndexAny(s, ":=")
+		if idx < 0 { return "[REDACTED]" }
+		return s[:idx+1] + "[REDACTED]"
 	})
-	kind := "credential_assignment"
-	if sub := secretPattern.FindStringSubmatch(cmd); len(sub) >= 2 {
-		kind = strings.ToLower(sub[1])
-	}
-	return model.Redaction{Redacted: out, Indicator: true, PatternType: kind, Field: "command_line"}
+	out = spacedFlag.ReplaceAllStringFunc(out, func(s string) string {
+		fields := strings.Fields(s)
+		if len(fields) == 0 { return "[REDACTED]" }
+		return fields[0] + " [REDACTED]"
+	})
+	out = authHeader.ReplaceAllStringFunc(out, func(s string) string {
+		i := strings.Index(strings.ToLower(s), "bearer")
+		if i < 0 { return "[REDACTED]" }
+		return s[:i+len("bearer")] + " [REDACTED]"
+	})
+	return model.Redaction{Redacted: out, Indicator: true, PatternType: "credential", Field: "command_line"}
 }
 
-// ContainsSecret chỉ báo có dấu hiệu bí mật; hàm không trả lại giá trị tìm thấy.
 func ContainsSecret(s string) bool {
-	return secretPattern.MatchString(s)
+	return assignment.MatchString(s) || spacedFlag.MatchString(s) || authHeader.MatchString(s)
 }
 
 func AssertNoSecret(haystack, originalCmd string) bool {
-	m := secretPattern.FindStringSubmatch(originalCmd)
-	if len(m) < 3 {
-		return true
+	redacted := RedactCommandLine(originalCmd)
+	if !redacted.Indicator { return true }
+	// A safe positive only when the original recognized matches are not reproduced.
+	for _, re := range []*regexp.Regexp{assignment, spacedFlag, authHeader} {
+		for _, m := range re.FindAllString(originalCmd, -1) {
+			if m == "" { continue }
+			var secret string
+			if i := strings.IndexAny(m, ":="); i >= 0 {
+				secret = strings.TrimSpace(m[i+1:])
+				if strings.EqualFold(secret, "Bearer") {
+					secret = ""
+				}
+			} else if f := strings.Fields(m); len(f) > 1 {
+				secret = f[len(f)-1]
+			}
+			secret = strings.Trim(secret, "\"'")
+			if secret != "" && strings.Contains(haystack, secret) {
+				return false
+			}
+		}
 	}
-	return !strings.Contains(haystack, m[2])
+	return true
 }

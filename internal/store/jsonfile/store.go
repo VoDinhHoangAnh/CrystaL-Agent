@@ -68,19 +68,31 @@ type Document struct {
 }
 
 type Store struct {
-	path string
-	mu   sync.Mutex
-	doc  Document
+	path     string
+	mu       sync.Mutex
+	doc      Document
+	lock     *writerLock
+	readOnly bool
+	broken   error
 }
 
 var _ repository.Repository = (*Store)(nil)
 
 // Open nạp JSON hiện có hoặc tạo tài liệu khởi đầu nếu đây là lần chạy đầu.
-func Open(path string, _ int) (*Store, error) {
+func Open(path string, _ int) (_ *Store, retErr error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	s := &Store{path: path, doc: emptyDocument()}
+	lock, err := acquireWriterLock(path)
+	if err != nil {
+		return nil, fmt.Errorf("store already owned by another writer or lock unavailable (%s): %w", path, err)
+	}
+	s := &Store{path: path, doc: emptyDocument(), lock: lock}
+	defer func() {
+		if retErr != nil {
+			_ = s.Close()
+		}
+	}()
 	b, err := os.ReadFile(path)
 	if err == nil {
 		if err := json.Unmarshal(b, &s.doc); err != nil {
@@ -92,6 +104,21 @@ func Open(path string, _ int) (*Store, error) {
 	} else if err := s.saveLocked(); err != nil {
 		return nil, err
 	}
+	return s, nil
+}
+
+// OpenReadOnly reads an existing snapshot without acquiring the writer lock.
+// It must never create or mutate production state, even while a service runs.
+func OpenReadOnly(path string) (*Store, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{path: path, doc: emptyDocument(), readOnly: true}
+	if err := json.Unmarshal(b, &s.doc); err != nil {
+		return nil, fmt.Errorf("đọc JSON state %s: %w", path, err)
+	}
+	s.normalize()
 	return s, nil
 }
 func emptyDocument() Document {
@@ -126,9 +153,53 @@ func (s *Store) normalize() {
 		s.doc.Transitions = []Transition{}
 	}
 }
-func (s *Store) Close() error { return nil }
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lock == nil {
+		return nil
+	}
+	err := s.lock.Close()
+	s.lock = nil
+	return err
+}
 func (s *Store) Path() string { return s.path }
-func (s *Store) saveLocked() error {
+
+// restoreAfterFailedWrite discards in-memory mutations that were not committed.
+// If readback is impossible, the writer is poisoned to avoid false acknowledgements.
+func (s *Store) restoreAfterFailedWrite() error {
+	b, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		s.doc = emptyDocument()
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var doc Document
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return err
+	}
+	s.doc = doc
+	s.normalize()
+	return nil
+}
+
+func (s *Store) saveLocked() (retErr error) {
+	if s.readOnly {
+		return os.ErrPermission
+	}
+	if s.broken != nil {
+		return s.broken
+	}
+	defer func() {
+		if retErr != nil {
+			if err := s.restoreAfterFailedWrite(); err != nil {
+				s.broken = fmt.Errorf("cannot recover store state after write failure: %w", err)
+				retErr = errors.Join(retErr, s.broken)
+			}
+		}
+	}()
 	s.doc.UpdatedAt = time.Now().UTC()
 	b, err := json.MarshalIndent(s.doc, "", "  ")
 	if err != nil {

@@ -204,11 +204,18 @@ func applyRedaction(n *model.Normalized, cfg model.Config) {
 	n.SecretIndicator = r.Indicator
 	n.SecretPatternType = r.PatternType
 	n.SecretField = r.Field
-	if n.Parent != nil && cfg.RedactCommandLine {
-		pr := privacy.RedactCommandLine(n.Parent.CommandLine)
-		n.Parent.CommandLine = pr.Redacted
-		if pr.Indicator {
+	if cfg.RedactCommandLine {
+		parentCmd := privacy.RedactCommandLine(n.Process.ParentCommand)
+		n.Process.ParentCommand = parentCmd.Redacted
+		if parentCmd.Indicator {
 			n.SecretIndicator = true
+		}
+		if n.Parent != nil {
+			pr := privacy.RedactCommandLine(n.Parent.CommandLine)
+			n.Parent.CommandLine = pr.Redacted
+			if pr.Indicator {
+				n.SecretIndicator = true
+			}
 		}
 	}
 }

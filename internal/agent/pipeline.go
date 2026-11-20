@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -32,6 +34,12 @@ type Pipeline struct {
 func (p *Pipeline) Ingest(ctx context.Context, rec model.CollectorRecord) error {
 	now := time.Now().UTC()
 	id := uuid.NewString()
+	var err error
+	rec.SecretDetected = rec.SecretDetected || privacy.ContainsSecret(rec.XML) ||
+		(rec.Process != nil && (privacy.ContainsSecret(rec.Process.CommandLine) || privacy.ContainsSecret(rec.Process.ParentCommand))) ||
+		(rec.Parent != nil && privacy.ContainsSecret(rec.Parent.CommandLine))
+	rec, err = privacy.SanitizeCollectorRecord(rec, p.Cfg.CollectCommandLine, p.Cfg.RedactCommandLine)
+	if err != nil { return fmt.Errorf("raw privacy guard: %w", err) }
 	payload, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -65,9 +73,13 @@ func (p *Pipeline) Handle(ctx context.Context, env model.RawEnvelope) error {
 		EventID: env.EventID, Source: env.Source, SourceEventKey: env.SourceEventKey,
 		EventTime: evTime, ObservedAt: obs, Kind: env.Kind, Snapshot: env.Snapshot, XML: env.XML, Payload: env.Payload,
 	}
-	if env.XML == "" && len(env.Payload) > 0 {
+	if len(env.Payload) > 0 {
 		var rec model.CollectorRecord
-		if json.Unmarshal(env.Payload, &rec) == nil {
+		if err := json.Unmarshal(env.Payload, &rec); err != nil {
+			return fmt.Errorf("invalid raw collector payload: %w", err)
+		}
+		src.SecretDetected = rec.SecretDetected
+		if env.XML == "" {
 			src.Process, src.Parent, src.Network = rec.Process, rec.Parent, rec.Network
 			if rec.XML != "" {
 				src.XML = rec.XML
@@ -77,7 +89,17 @@ func (p *Pipeline) Handle(ctx context.Context, env model.RawEnvelope) error {
 			}
 		}
 	}
+	if src.XML != "" {
+		var event model.WinEvent
+		if err := xml.Unmarshal([]byte(src.XML), &event); err != nil {
+			return fmt.Errorf("invalid Windows event XML (source=%s key=%s): %w", src.Source, src.SourceEventKey, err)
+		}
+		if event.XMLName.Local != "Event" || event.System.EventID == "" {
+			return fmt.Errorf("missing Event root or EventID (source=%s key=%s)", src.Source, src.SourceEventKey)
+		}
+	}
 	n := normalize.Envelope(p.AgentID, src, p.Cfg)
+	n.SecretIndicator = n.SecretIndicator || src.SecretDetected
 
 	// Ghép sự kiện với đúng lần chạy process trước khi gắn event và network vào timeline.
 	var rr model.ResolveResult

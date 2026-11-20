@@ -33,6 +33,7 @@ type SourceRecord struct {
 	Snapshot       bool
 	XML            string
 	Payload        json.RawMessage
+	SecretDetected bool
 	Process        *ProcessFacts
 	Parent         *ProcessFacts
 	Network        *NetworkFacts
@@ -46,6 +47,7 @@ type CollectorRecord struct {
 	Snapshot       bool
 	XML            string
 	Payload        json.RawMessage
+	SecretDetected bool
 	Process        *ProcessFacts
 	Parent         *ProcessFacts
 	Network        *NetworkFacts
