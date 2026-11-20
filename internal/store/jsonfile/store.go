@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"AegisPlus/CrystaL/internal/authdetect"
 	"AegisPlus/CrystaL/internal/dto"
 	"AegisPlus/CrystaL/internal/model"
 	"AegisPlus/CrystaL/internal/repository"
@@ -373,8 +374,73 @@ func (s *Store) PersistAnalyzed(ctx context.Context, in model.PersistInput) erro
 	if in.TrackIP && in.IPKey != "" {
 		s.upsertTrackedLocked(in, "ip", in.IPKey)
 	}
+	// Recompute one bounded auth identity on the currently persisted timeline.
+	// All affected assessments and the new raw processed bit are saved together.
+	if in.Norm.Authentication != nil {
+		s.reconcileAuthLocked(in.Norm)
+	}
 	return s.saveLocked()
 }
+
+// reconcileAuthLocked reconstructs auth findings from event-time order.
+// It is invoked under the existing store mutex and commits in the same write.
+// This JSON implementation scans history; replace with indexed time-range
+// queries when moving to SQLite.
+func (s *Store) reconcileAuthLocked(current model.Normalized) {
+	a := current.Authentication
+	if a == nil || a.Username == "" || a.SourceIP == "" { return }
+	if a.EventCode != 4624 && a.EventCode != 4625 { return }
+	related := make([]model.Normalized, 0, 16)
+	indices := make([]int, 0, 16)
+	for i := range s.doc.AnalyzedEvents {
+		n := s.doc.AnalyzedEvents[i].Data.Norm
+		other := n.Authentication
+		if other == nil || n.AgentID != current.AgentID || other.SourceIP == "" || other.Username == "" {
+			continue
+		}
+		if strings.EqualFold(other.Username,a.Username) &&
+			strings.EqualFold(other.Domain,a.Domain) &&
+			strings.EqualFold(other.SourceIP,a.SourceIP) {
+			related = append(related,n)
+			indices = append(indices,i)
+		}
+	}
+	plan := authdetect.Reconcile(related)
+	for _, idx := range indices {
+		entry := &s.doc.AnalyzedEvents[idx].Data
+		kept := make([]model.Finding,0,len(entry.Assessment.Findings)+2)
+		for _, f := range entry.Assessment.Findings {
+			if !strings.HasPrefix(f.RuleID,"auth_") {
+				kept = append(kept,f)
+			}
+		}
+		newFindings := plan[entry.Norm.EventID]
+		kept = append(kept,newFindings...)
+		entry.Assessment.Findings = kept
+		score := 0
+		for _, f := range kept {score += f.Points}
+		entry.Assessment.Score = score
+		switch {
+		case score >= 85:
+			entry.Assessment.Severity = "critical"
+		case score >= 70:
+			entry.Assessment.Severity = "high"
+		case score >= 40:
+			entry.Assessment.Severity = "medium"
+		case score > 0:
+			entry.Assessment.Severity = "low"
+		default:
+			entry.Assessment.Severity = "info"
+		}
+		entry.Assessment.Track = len(kept) != 0
+		if len(newFindings)>0 && entry.Norm.Authentication.SourceIP!="" {
+			entry.IPKey = entry.Norm.Authentication.SourceIP
+			entry.TrackIP = true
+			s.upsertTrackedLocked(*entry,"ip",entry.IPKey)
+		}
+	}
+}
+
 func (s *Store) markProcessedLocked(id string) error {
 	for i := range s.doc.RawEvents {
 		if s.doc.RawEvents[i].Envelope.EventID == id {
