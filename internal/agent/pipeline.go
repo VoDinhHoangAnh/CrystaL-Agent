@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -32,6 +34,9 @@ type Pipeline struct {
 func (p *Pipeline) Ingest(ctx context.Context, rec model.CollectorRecord) error {
 	now := time.Now().UTC()
 	id := uuid.NewString()
+	var err error
+	rec, err = privacy.SanitizeCollectorRecord(rec, p.Cfg.CollectCommandLine, p.Cfg.RedactCommandLine)
+	if err != nil { return fmt.Errorf("raw privacy guard: %w", err) }
 	payload, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -75,6 +80,15 @@ func (p *Pipeline) Handle(ctx context.Context, env model.RawEnvelope) error {
 			if rec.Kind != "" {
 				src.Kind = rec.Kind
 			}
+		}
+	}
+	if src.XML != "" {
+		var event model.WinEvent
+		if err := xml.Unmarshal([]byte(src.XML), &event); err != nil {
+			return fmt.Errorf("invalid Windows event XML (source=%s key=%s): %w", src.Source, src.SourceEventKey, err)
+		}
+		if event.XMLName.Local != "Event" || event.System.EventID == "" {
+			return fmt.Errorf("missing Event root or EventID (source=%s key=%s)", src.Source, src.SourceEventKey)
 		}
 	}
 	n := normalize.Envelope(p.AgentID, src, p.Cfg)

@@ -153,7 +153,7 @@ func Run(ctx context.Context, cfg model.Config) error {
 
 // Status đọc thống kê đã lưu để xem agent đang có bao nhiêu dữ liệu và collector nào lỗi.
 func Status(ctx context.Context, cfg model.Config) error {
-	st, err := jsonfile.Open(cfg.JSONPath, 0)
+	st, err := jsonfile.OpenReadOnly(cfg.JSONPath)
 	if err != nil {
 		return err
 	}

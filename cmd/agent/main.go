@@ -140,7 +140,13 @@ func trackingCmd(ctx context.Context, cfg model.Config, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("tracking subcommand required: list|show|close")
 	}
-	st, err := jsonfile.Open(cfg.JSONPath, 0)
+	var st *jsonfile.Store
+	var err error
+	if args[0] == "close" {
+		st, err = jsonfile.Open(cfg.JSONPath, 0)
+	} else {
+		st, err = jsonfile.OpenReadOnly(cfg.JSONPath)
+	}
 	if err != nil {
 		return err
 	}
@@ -192,7 +198,7 @@ func processCmd(ctx context.Context, cfg model.Config, args []string) error {
 	if len(args) != 2 || args[0] != "trace" {
 		return fmt.Errorf("cách dùng: process trace <PID-hoặc-Process-GUID>")
 	}
-	repo, err := jsonfile.Open(cfg.JSONPath, 0)
+	repo, err := jsonfile.OpenReadOnly(cfg.JSONPath)
 	if err != nil {
 		return err
 	}
