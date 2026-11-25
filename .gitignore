@@ -37,7 +37,11 @@ coverage.html
 Thumbs.db
 .DS_Store
 
-# Tài liệu phát triển và ghi chú, giữ lại README ở gốc
-docs/
+# Tài liệu phát triển không đưa lên Git
+/docs/
 *.md
 !README.md
+
+# Rust build output
+target/
+**/target/

@@ -1,0 +1,32 @@
+#![allow(non_snake_case)]
+#[path = "Agent/AgentModule.rs"]
+pub mod Agent;
+#[cfg(windows)]
+#[path = "Collector/CollectorModule.rs"]
+pub mod Collector;
+#[path = "Config/ConfigModule.rs"]
+pub mod Config;
+#[path = "Controller/ControllerModule.rs"]
+pub mod Controller;
+#[path = "Dto/DtoModule.rs"]
+pub mod Dto;
+#[path = "Model/ModelModule.rs"]
+pub mod Model;
+#[path = "Normalize/NormalizeModule.rs"]
+pub mod Normalize;
+#[path = "Privacy/PrivacyModule.rs"]
+pub mod Privacy;
+#[path = "ProcessGraph/ProcessGraphModule.rs"]
+pub mod ProcessGraph;
+#[path = "RawStore/RawStoreModule.rs"]
+pub mod RawStore;
+#[path = "Repository/RepositoryModule.rs"]
+pub mod Repository;
+#[path = "Risk/RiskModule.rs"]
+pub mod Risk;
+#[path = "Service/ServiceModule.rs"]
+pub mod Service;
+#[path = "Store/StoreModule.rs"]
+pub mod Store;
+#[path = "Tracking/TrackingModule.rs"]
+pub mod Tracking;

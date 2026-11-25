@@ -1,55 +1,48 @@
-# PBRA Agent
+# CrystaL Agent
 
-PBRA Agent thu thập Windows Event Log, tiến trình và kết nối mạng. Dữ liệu được lưu trên máy tại `%ProgramData%\PBRA\pbra.json`.
+Agent Windows viết bằng Rust, thu thập Windows Event Log, process và kết nối mạng.
+
+## Dữ liệu
+
+- Dữ liệu chính: `%ProgramData%\PBRA\pbra.json`.
+- Log theo nhóm: `%ProgramData%\PBRA\logs\Auth.log`, `Network.log` và `Sysmon.log`.
+- Mỗi dòng trong file `.log` là một bản ghi JSON. Log cũ trong `pbra.json` không tự tách ngược ra file nhóm.
+- Event process, System và các nguồn endpoint còn lại được gom vào `Sysmon.log`. File `Process.log` hoặc `System.log` từ bản cũ không tự nhập/xóa.
+- Khi ổ log còn dưới 512 MiB, agent thử các thư mục dự phòng trong `.env`. File cũ vẫn ở ổ trước đó; event mới được ghi sang ổ dự phòng.
+- `pbra.json` giữ raw 14 ngày và normalized 30 ngày theo cấu hình mặc định. File nhóm `.log` không tự xóa.
 
 ## Chạy thử
 
-Mở PowerShell bằng quyền Administrator tại thư mục dự án:
+Mở PowerShell Administrator tại thư mục dự án:
 
 ```powershell
-go run ./cmd/agent validate-sources
-go run ./cmd/agent run
+cargo build --release
+.\target\release\crystal-agent.exe validate-sources
+.\target\release\crystal-agent.exe run
 ```
 
-Dừng bằng `Ctrl+C`.
-
-## Chạy nền cùng Windows
-
-Tạo file chạy:
+Xem trạng thái:
 
 ```powershell
-go build -o crystal-agent.exe ./cmd/agent
+.\target\release\crystal-agent.exe status
 ```
 
-Cài và khởi động service:
+Tra process:
 
 ```powershell
-.\crystal-agent.exe install
-Get-Service -Name CrystaLAgent
+.\target\release\crystal-agent.exe process trace <PID-hoặc-GUID>
 ```
 
-Service tự chạy khi Windows khởi động. Dừng hoặc chạy lại bằng:
+## Chạy cùng Windows
+
+Cài service một lần bằng quyền Administrator:
 
 ```powershell
-Stop-Service -Name CrystaLAgent
-Start-Service -Name CrystaLAgent
+.\target\release\crystal-agent.exe install
 ```
 
-Gỡ service:
+Service được cấu hình tự chạy khi Windows khởi động. Gỡ bằng lệnh `uninstall`.
 
-```powershell
-Stop-Service -Name CrystaLAgent
-.\crystal-agent.exe uninstall
-```
+## Cấu hình
 
-Không chạy lệnh `run` khi service đang hoạt động.
-
-## Cấu hình và dữ liệu
-
-Đặt `.env` và `events.yaml` cạnh file `.exe`. Mẫu cấu hình nằm trong `.env.example`. Log hoạt động của service nằm ở `%ProgramData%\PBRA\agent.log`.
-
-Tra cứu lịch sử process:
-
-```powershell
-.\crystal-agent.exe process trace <PID-hoặc-Process-GUID>
-```
+Sao chép `.env.example` thành `.env` để cấu hình đường dẫn dữ liệu, ổ dự phòng và thời hạn lưu. Nguồn event được khai báo trong `events.yaml`.
