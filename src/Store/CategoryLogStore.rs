@@ -84,7 +84,7 @@ impl LogArchive for FileLogArchive {
             if let Some(existing_key) = last_record_key(&path)?
                 && existing_key == dedupe_key
             {
-                return Ok(());
+                return sync_existing(&path);
             }
         }
 
@@ -104,7 +104,7 @@ impl LogArchive for FileLogArchive {
             }
 
             let path = directory.join(&file_name);
-            match append_line(&path, &line) {
+            match append_line(&path, &line, &dedupe_key) {
                 Ok(()) => return Ok(()),
                 Err(error) => errors.push(format!("{}: {error}", path.display())),
             }
@@ -118,7 +118,22 @@ impl LogArchive for FileLogArchive {
     }
 }
 
-fn append_line(path: &Path, line: &[u8]) -> Result<(), String> {
+fn append_line(path: &Path, line: &[u8], key: &str) -> Result<(), String> {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(PathBuf::from(lock_path))
+        .map_err(|e| e.to_string())?;
+    lock.try_lock()
+        .map_err(|e| format!("archive writer lock unavailable: {e}"))?;
+    // Recheck under ownership: another writer may have appended since the first lookup.
+    if last_record_key(path)?.as_deref() == Some(key) {
+        return sync_existing(path);
+    }
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -135,7 +150,17 @@ fn append_line(path: &Path, line: &[u8]) -> Result<(), String> {
             file.write_all(b"\n").map_err(|error| error.to_string())?;
         }
     }
-    file.write_all(line).map_err(|error| error.to_string())
+    file.write_all(line).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())
+}
+
+fn sync_existing(path: &Path) -> Result<(), String> {
+    // A previous append may have reached the page cache before sync failed.
+    OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| error.to_string())
 }
 
 fn dedupe_key(agent_id: &str, source: &str, source_event_key: &str) -> String {
@@ -276,6 +301,29 @@ fn available_bytes(_path: &Path) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::Repository::LogArchive;
+
+    #[test]
+    fn archive_lock_prevents_interleaved_writes_and_releases() {
+        let directory =
+            std::env::temp_dir().join(format!("crystal-archive-lock-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("Sysmon.log");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(directory.join("Sysmon.log.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        assert!(append_line(&path, b"{\"dedupe_key\":\"one\"}\n", "one").is_err());
+        assert!(!path.exists());
+        drop(lock);
+        append_line(&path, b"{\"dedupe_key\":\"one\"}\n", "one").unwrap();
+        append_line(&path, b"{\"dedupe_key\":\"one\"}\n", "one").unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap().lines().count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn appending_same_event_twice_writes_one_line() {

@@ -3,12 +3,15 @@ use crate::Model::{
 };
 use chrono::{DateTime, Utc};
 
-pub trait Repository {
+pub trait RepositoryReader {
+    fn trace_process(&self, selector: &str) -> Result<ProcessTrace, String>;
+    fn stats(&self) -> StoreStats;
+}
+
+pub trait Repository: RepositoryReader {
     fn append_raw(&mut self, raw: RawEnvelope) -> Result<(), String>;
     fn persist(&mut self, input: PersistInput) -> Result<(), String>;
-    fn trace_process(&self, selector: &str) -> Result<ProcessTrace, String>;
     fn close_case(&mut self, id: &str, reason: &str) -> Result<(), String>;
-    fn stats(&self) -> StoreStats;
 }
 
 /// Nơi lưu bản ghi log đã chuẩn hóa theo từng nhóm, tách khỏi kho trạng thái chung.

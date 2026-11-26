@@ -1,7 +1,7 @@
 use crate::{
     Config::{Config, EventGroup},
     Dto::ProcessTrace,
-    Repository::Repository,
+    Repository::RepositoryReader,
 };
 
 const CATEGORY: &str = "process";
@@ -15,6 +15,9 @@ pub fn event_groups(config: &Config) -> Vec<EventGroup> {
         .collect()
 }
 
-pub fn trace_process(repository: &impl Repository, selector: &str) -> Result<ProcessTrace, String> {
+pub fn trace_process(
+    repository: &impl RepositoryReader,
+    selector: &str,
+) -> Result<ProcessTrace, String> {
     repository.trace_process(selector)
 }

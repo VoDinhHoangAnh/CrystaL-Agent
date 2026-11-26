@@ -44,7 +44,7 @@ fn entry() -> Result<(), Box<dyn Error>> {
             let selector = args
                 .next()
                 .ok_or("usage: crystal-agent process trace <PID|GUID>")?;
-            let repo = Store::JsonStore::open(&cfg.json_path)?;
+            let repo = Store::JsonSnapshot::open(&cfg.json_path)?;
             let trace = Controller::Process::trace(&repo, &selector)?;
             println!("{}", serde_json::to_string_pretty(&trace)?);
             Ok(())

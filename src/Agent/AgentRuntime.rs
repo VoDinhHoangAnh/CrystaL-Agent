@@ -10,7 +10,7 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::Repository::Repository;
+use crate::Repository::RepositoryReader;
 use crate::{
     Config::Config,
     Model::{CollectorHealth, PersistInput, RawEnvelope},
@@ -211,7 +211,7 @@ fn ingest(
 }
 
 pub fn status(cfg: &Config) -> Result<(), Box<dyn Error>> {
-    let store = JsonStore::open(&cfg.json_path)?;
+    let store = crate::Store::JsonSnapshot::open(&cfg.json_path)?;
     let s = store.stats();
     println!(
         "logs_dir={} fallback_dirs={} minimum_free_bytes={}",

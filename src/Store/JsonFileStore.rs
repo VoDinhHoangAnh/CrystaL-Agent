@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -13,7 +13,7 @@ use crate::{
         Checkpoint, CollectorHealth, Finding, PersistInput, ProcessNode, ProcessTrace, RawEnvelope,
         TcpFlow, TraceEvent, TrackedEntity,
     },
-    Repository::{Repository, StoreStats},
+    Repository::{Repository, RepositoryReader, StoreStats},
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -104,16 +104,63 @@ fn raw_record_matches(record: &RawRecord, event: &RawEnvelope) -> bool {
 pub struct JsonStore {
     path: PathBuf,
     doc: Document,
+    // Never unlink the lock file: doing so permits locking two different inodes.
+    _writer_lock: Option<File>,
+    failed: bool,
+}
+
+/// Immutable committed snapshot; opening it never creates, deletes or repairs files.
+pub struct JsonSnapshot {
+    inner: JsonStore,
+}
+impl JsonSnapshot {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref().to_path_buf();
+        let doc = read_document(&path)?.ok_or("no readable committed state")?;
+        Ok(Self {
+            inner: JsonStore {
+                path,
+                doc,
+                _writer_lock: None,
+                failed: false,
+            },
+        })
+    }
+}
+impl RepositoryReader for JsonSnapshot {
+    fn trace_process(&self, selector: &str) -> Result<ProcessTrace, String> {
+        self.inner.trace_process(selector)
+    }
+    fn stats(&self) -> StoreStats {
+        self.inner.stats()
+    }
 }
 impl JsonStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
-        let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
+        let requested = path.as_ref();
+        let parent = requested
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let path = fs::canonicalize(parent)
+            .map_err(|e| e.to_string())?
+            .join(requested.file_name().ok_or("state path has no file name")?);
+        let mut lock_name = path.as_os_str().to_os_string();
+        lock_name.push(".lock");
+        let writer_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(PathBuf::from(lock_name))
+            .map_err(|e| format!("open writer lock: {e}"))?;
+        writer_lock
+            .try_lock()
+            .map_err(|e| format!("state writer already active or lock unavailable: {e}"))?;
         let tmp = temporary_path(&path);
-        let main_doc = read_document(&path);
-        let tmp_doc = read_document(&tmp);
+        let main_doc = read_document(&path)?;
+        let tmp_doc = read_document(&tmp)?;
 
         // Sau sự cố giữa lúc ghi, file tạm có thể chứa checkpoint mới hơn file chính.
         let (doc, recover_tmp) = match (main_doc, tmp_doc) {
@@ -130,13 +177,19 @@ impl JsonStore {
         } else if tmp.exists() {
             fs::remove_file(&tmp).map_err(|e| format!("không xóa được file tạm cũ: {e}"))?;
         }
-        let mut store = Self { path, doc };
+        let mut store = Self {
+            path,
+            doc,
+            _writer_lock: Some(writer_lock),
+            failed: false,
+        };
         if !store.path.exists() {
             store.save()?;
         }
         Ok(store)
     }
     pub fn save_health(&mut self, health: CollectorHealth) -> Result<(), String> {
+        self.writable()?;
         if self
             .doc
             .collectors
@@ -156,6 +209,10 @@ impl JsonStore {
         self.save()
     }
     pub fn save_checkpoint(&mut self, id: &str, record_id: i64) -> Result<(), String> {
+        self.writable()?;
+        if record_id <= self.checkpoint(id) {
+            return Ok(());
+        }
         self.doc.checkpoints.insert(
             id.into(),
             Checkpoint {
@@ -186,6 +243,7 @@ impl JsonStore {
         checkpoint: Option<(String, i64)>,
         archive_written: bool,
     ) -> Result<(), String> {
+        self.writable()?;
         let mut changed = self.insert_raw(raw.clone());
         if archive_written
             && let Some(record) = self
@@ -269,6 +327,7 @@ impl JsonStore {
         true
     }
     pub fn ensure_agent(&mut self, id: &str, host: &str) -> Result<(), String> {
+        self.writable()?;
         let now = Utc::now();
         if let Some(a) = self.doc.agents.iter_mut().find(|a| a.id == id) {
             a.last_seen_at = now;
@@ -290,7 +349,32 @@ impl JsonStore {
         &self.path
     }
     fn save(&mut self) -> Result<(), String> {
-        self.doc.updated_at = Some(Utc::now());
+        self.writable()?;
+        let result = self.save_inner();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+    fn writable(&self) -> Result<(), String> {
+        if self.failed || self._writer_lock.is_none() {
+            Err("writer unavailable after failed commit; drop and reopen to recover".into())
+        } else {
+            Ok(())
+        }
+    }
+    fn save_inner(&mut self) -> Result<(), String> {
+        // Recovery ordering must survive a wall-clock correction backwards.
+        let next = self
+            .doc
+            .updated_at
+            .map(|previous| {
+                previous
+                    .checked_add_signed(chrono::Duration::nanoseconds(1))
+                    .ok_or("state timestamp cannot advance")
+            })
+            .transpose()?;
+        self.doc.updated_at = Some(Utc::now().max(next.unwrap_or(DateTime::<Utc>::MIN_UTC)));
         let tmp = temporary_path(&self.path);
         let data = serde_json::to_vec_pretty(&self.doc).map_err(|e| e.to_string())?;
         let mut file = OpenOptions::new()
@@ -301,19 +385,31 @@ impl JsonStore {
             .map_err(|e| e.to_string())?;
         file.write_all(&data).map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
         replace_file(&tmp, &self.path)
     }
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
-    let mut tmp = path.to_path_buf();
-    tmp.set_extension("json.tmp");
-    tmp
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    PathBuf::from(tmp)
 }
 
-fn read_document(path: &Path) -> Option<Document> {
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+fn read_document(path: &Path) -> Result<Option<Document>, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    let doc: Option<Document> = serde_json::from_slice(&bytes).ok();
+    if doc
+        .as_ref()
+        .is_some_and(|doc| doc.schema_version != schema_version())
+    {
+        return Err(format!("unsupported state schema at {}", path.display()));
+    }
+    Ok(doc)
 }
 
 fn is_newer(candidate: &Document, current: &Document) -> bool {
@@ -335,22 +431,34 @@ fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
     let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
     let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
     // Giữ thao tác thay file nguyên tử trên Windows và yêu cầu hệ điều hành flush metadata.
-    let ok = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error().to_string())
-    } else {
-        Ok(())
+    // Windows may deny replacement while a short-lived reader or antivirus has
+    // the destination open. Keep the synced temporary state intact on failure.
+    for attempt in 0..100 {
+        let ok = unsafe {
+            MoveFileExW(
+                from.as_ptr(),
+                to.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if !matches!(error.raw_os_error(), Some(5 | 32 | 33)) || attempt == 99 {
+            return Err(error.to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    unreachable!()
 }
 
 impl Repository for JsonStore {
+    fn close_case(&mut self, id: &str, reason: &str) -> Result<(), String> {
+        self.close_case_inner(id, reason)
+    }
     fn append_raw(&mut self, raw: RawEnvelope) -> Result<(), String> {
+        self.writable()?;
         if self.insert_raw(raw) {
             self.save()
         } else {
@@ -358,11 +466,18 @@ impl Repository for JsonStore {
         }
     }
     fn persist(&mut self, input: PersistInput) -> Result<(), String> {
+        self.writable()?;
         if self.persist_record(input) {
             self.save()
         } else {
             Ok(())
         }
+    }
+}
+
+impl RepositoryReader for JsonStore {
+    fn stats(&self) -> StoreStats {
+        self.stats_inner()
     }
     fn trace_process(&self, selector: &str) -> Result<ProcessTrace, String> {
         let mut trace = ProcessTrace {
@@ -488,7 +603,10 @@ impl Repository for JsonStore {
         }
         Ok(trace)
     }
-    fn close_case(&mut self, id: &str, reason: &str) -> Result<(), String> {
+}
+impl JsonStore {
+    fn close_case_inner(&mut self, id: &str, reason: &str) -> Result<(), String> {
+        self.writable()?;
         let entity = self
             .doc
             .tracked_entities
@@ -508,7 +626,9 @@ impl Repository for JsonStore {
         });
         self.save()
     }
-    fn stats(&self) -> StoreStats {
+}
+impl JsonStore {
+    fn stats_inner(&self) -> StoreStats {
         let bytes = fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         let tracked: Vec<_> = self
             .doc
@@ -583,6 +703,7 @@ impl JsonStore {
         norm_days: i64,
         resolved_days: i64,
     ) -> Result<(), String> {
+        self.writable()?;
         let now = Utc::now();
         let raw_cut = now - chrono::Duration::days(raw_days);
         let norm_cut = now - chrono::Duration::days(norm_days);
@@ -617,6 +738,250 @@ impl JsonStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_path() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("crystal-r1-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("pbra.json")
+    }
+
+    #[test]
+    fn unsupported_schema_is_preserved() {
+        let path = test_path();
+        let bytes = br#"{"schema_version":999,"future_data":[1]}"#;
+        fs::write(&path, bytes).unwrap();
+        assert!(JsonStore::open(&path).is_err());
+        assert!(JsonSnapshot::open(&path).is_err());
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn different_state_names_have_independent_temporary_files() {
+        let path = test_path();
+        let other = path.with_extension("backup");
+        assert_ne!(temporary_path(&path), temporary_path(&other));
+        let mut first = JsonStore::open(&path).unwrap();
+        let mut second = JsonStore::open(&other).unwrap();
+        first.save_checkpoint("System", 42).unwrap();
+        second.save_checkpoint("System", 99).unwrap();
+        assert_eq!(
+            JsonSnapshot::open(path).unwrap().inner.checkpoint("System"),
+            42
+        );
+        assert_eq!(
+            JsonSnapshot::open(other)
+                .unwrap()
+                .inner
+                .checkpoint("System"),
+            99
+        );
+    }
+
+    #[test]
+    fn commit_timestamp_increases_when_clock_goes_backwards() {
+        let path = test_path();
+        let mut writer = JsonStore::open(&path).unwrap();
+        let future = Utc::now() + chrono::Duration::days(1);
+        writer.doc.updated_at = Some(future);
+        writer.save_checkpoint("System", 42).unwrap();
+        assert!(writer.doc.updated_at.unwrap() > future);
+    }
+
+    #[test]
+    fn writer_exclusion_and_release_preserve_checkpoint() {
+        let path = test_path();
+        let mut writer = JsonStore::open(&path).unwrap();
+        writer.save_checkpoint("Security", 42).unwrap();
+        assert!(JsonStore::open(&path).is_err());
+        assert!(JsonStore::open(path.parent().unwrap().join(".").join("pbra.json")).is_err());
+        let reader = JsonSnapshot::open(&path).unwrap();
+        assert_eq!(reader.inner.checkpoint("Security"), 42);
+        writer.save_checkpoint("Security", 43).unwrap();
+        assert_eq!(reader.inner.checkpoint("Security"), 42); // stable snapshot
+        drop(writer);
+        let mut reopened = JsonStore::open(&path).unwrap();
+        assert_eq!(reopened.checkpoint("Security"), 43);
+        reopened.save_checkpoint("Security", 1).unwrap();
+        assert_eq!(reopened.checkpoint("Security"), 43);
+    }
+
+    #[test]
+    fn readers_never_recover_delete_or_create_files() {
+        let path = test_path();
+        assert!(JsonSnapshot::open(&path).is_err());
+        assert!(!path.exists());
+        assert!(!path.with_extension("json.lock").exists());
+        let mut writer = JsonStore::open(&path).unwrap();
+        writer.save_checkpoint("System", 10).unwrap();
+        let main = fs::read(&path).unwrap();
+        let temporary = temporary_path(&path);
+        fs::write(&temporary, b"incomplete").unwrap();
+        let reader = JsonSnapshot::open(&path).unwrap();
+        reader.stats();
+        assert!(reader.trace_process("missing").is_err());
+        assert_eq!(fs::read(&path).unwrap(), main);
+        assert_eq!(fs::read(&temporary).unwrap(), b"incomplete");
+    }
+
+    #[test]
+    fn corrupt_state_is_not_replaced_with_empty_storage() {
+        let path = test_path();
+        fs::write(&path, b"corrupt main").unwrap();
+        fs::write(temporary_path(&path), b"corrupt temp").unwrap();
+        assert!(JsonStore::open(&path).is_err());
+        assert!(JsonSnapshot::open(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"corrupt main");
+        assert_eq!(fs::read(temporary_path(&path)).unwrap(), b"corrupt temp");
+        // Failed open must release the writer lock.
+        fs::write(&path, serde_json::to_vec(&Document::default()).unwrap()).unwrap();
+        assert!(JsonStore::open(&path).is_ok());
+    }
+
+    #[test]
+    fn io_error_is_not_treated_as_missing_state() {
+        let path = test_path();
+        fs::create_dir(&path).unwrap();
+        fs::write(
+            temporary_path(&path),
+            serde_json::to_vec(&Document::default()).unwrap(),
+        )
+        .unwrap();
+        assert!(JsonStore::open(&path).is_err());
+        assert!(path.is_dir());
+        assert!(temporary_path(&path).is_file());
+    }
+
+    #[test]
+    fn failed_commit_requires_reopen_before_retry() {
+        let path = test_path();
+        let mut writer = JsonStore::open(&path).unwrap();
+        fs::create_dir(temporary_path(&path)).unwrap();
+        assert!(writer.save_checkpoint("System", 10).is_err());
+        fs::remove_dir(temporary_path(&path)).unwrap();
+        assert!(writer.save_checkpoint("System", 10).is_err());
+        assert!(
+            writer
+                .commit_event(Default::default(), Default::default(), None, false)
+                .is_err()
+        );
+        drop(writer);
+        assert_eq!(JsonStore::open(&path).unwrap().checkpoint("System"), 0);
+    }
+
+    #[test]
+    fn valid_main_discards_incomplete_or_stale_temporary_state() {
+        let path = test_path();
+        let mut writer = JsonStore::open(&path).unwrap();
+        writer.save_checkpoint("System", 42).unwrap();
+        drop(writer);
+        for bytes in [
+            b"incomplete".to_vec(),
+            serde_json::to_vec(&Document {
+                updated_at: None,
+                ..Document::default()
+            })
+            .unwrap(),
+        ] {
+            fs::write(temporary_path(&path), bytes).unwrap();
+            let reopened = JsonStore::open(&path).unwrap();
+            assert_eq!(reopened.checkpoint("System"), 42);
+            assert!(!temporary_path(&path).exists());
+        }
+    }
+
+    #[test]
+    fn temporary_only_state_is_recovered_by_writer_only() {
+        let path = test_path();
+        let doc = Document {
+            checkpoints: HashMap::from([(
+                "System".into(),
+                Checkpoint {
+                    record_id: 42,
+                    updated_at: Utc::now(),
+                },
+            )]),
+            ..Document::default()
+        };
+        fs::write(temporary_path(&path), serde_json::to_vec(&doc).unwrap()).unwrap();
+        assert!(JsonSnapshot::open(&path).is_err());
+        assert!(!path.exists());
+        assert_eq!(JsonStore::open(&path).unwrap().checkpoint("System"), 42);
+    }
+
+    #[test]
+    fn concurrent_snapshots_preserve_all_committed_events() {
+        let path = test_path();
+        let mut writer = JsonStore::open(&path).unwrap();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            for _ in 0..50 {
+                let s = JsonSnapshot::open(&reader_path).unwrap().stats();
+                assert_eq!(s.raw_count, s.analyzed_count);
+            }
+        });
+        for id in 1..=25 {
+            let raw = RawEnvelope {
+                event_id: id.to_string(),
+                agent_id: "test".into(),
+                source: "System".into(),
+                source_event_key: format!("System|{id}"),
+                ..Default::default()
+            };
+            let input = PersistInput {
+                normalized: crate::Model::Normalized {
+                    event_id: raw.event_id.clone(),
+                    agent_id: raw.agent_id.clone(),
+                    source: raw.source.clone(),
+                    source_event_key: raw.source_event_key.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            writer
+                .commit_event(raw, input, Some(("System".into(), id)), true)
+                .unwrap();
+        }
+        reader.join().unwrap();
+        drop(writer);
+        let reopened = JsonStore::open(path).unwrap();
+        assert_eq!(reopened.stats().raw_count, 25);
+        assert_eq!(reopened.stats().analyzed_count, 25);
+        assert_eq!(reopened.checkpoint("System"), 25);
+    }
+
+    #[test]
+    fn child_writer_probe() {
+        let Some(path) = std::env::var_os("CRYSTAL_TEST_WRITER_PATH") else {
+            return;
+        };
+        if std::env::var_os("CRYSTAL_TEST_ABORT").is_some() {
+            let _writer = JsonStore::open(path).unwrap();
+            std::process::exit(0); // bypass Drop, like a terminated service
+        }
+        assert!(JsonStore::open(path).is_err());
+    }
+
+    #[test]
+    fn cross_process_exclusion_and_exit_release() {
+        let path = test_path();
+        let writer = JsonStore::open(&path).unwrap();
+        let child = || {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args(["--exact", "Store::JsonFileStore::tests::child_writer_probe"])
+                .env("CRYSTAL_TEST_WRITER_PATH", &path);
+            cmd
+        };
+        assert!(child().status().unwrap().success());
+        drop(writer);
+        assert!(
+            child()
+                .env("CRYSTAL_TEST_ABORT", "1")
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(JsonStore::open(&path).is_ok());
+    }
 
     #[test]
     fn recovers_newer_valid_temporary_state() {
